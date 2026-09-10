@@ -33,3 +33,7 @@ orderagent:
   max-iterations: 6
   token-budget: 20000
   model-call-timeout-seconds: 30
+  breaker-threshold: 3
+  demo:
+    fail-refund-tool: false
+    dry-run-mode: false

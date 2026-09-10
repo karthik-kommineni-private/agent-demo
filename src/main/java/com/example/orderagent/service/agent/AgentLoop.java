@@ -6,6 +6,8 @@ import com.example.orderagent.config.AgentProperties;
 import com.example.orderagent.dto.response.AgentResponse;
 import com.example.orderagent.dto.tool.SubmitAnswerInput;
 import com.example.orderagent.enums.TerminationReason;
+import com.example.orderagent.exception.BreakerOpenException;
+import com.example.orderagent.service.governance.BreakerRegistry;
 import com.example.orderagent.service.tool.ToolRegistry;
 import java.util.List;
 import java.util.UUID;
@@ -49,10 +51,12 @@ import tools.jackson.databind.ObjectMapper;
  * <p><b>How it stops:</b> the model calls {@code submit_answer} (normal —
  * {@code TerminationReason.COMPLETED}), the iteration cap is hit
  * ({@code ITERATION_CAP}), the token budget is spent ({@code BUDGET_CAP}),
- * a model call fails or times out ({@code MODEL_UNAVAILABLE}), or the
- * model stops calling tools without ever calling {@code submit_answer} —
- * a genuine contract violation, reported as {@code AgentStatus.ERROR}.
- * Every path returns an {@link AgentResponse}; nothing throws out of here.
+ * a model call fails or times out ({@code MODEL_UNAVAILABLE}), the last
+ * tool called has failed enough times in a row to open its circuit breaker
+ * ({@code BREAKER_OPEN}), or the model stops calling tools without ever
+ * calling {@code submit_answer} — a genuine contract violation, reported
+ * as {@code AgentStatus.ERROR}. Every path returns an {@link AgentResponse};
+ * nothing throws out of here.
  *
  * <p>Spring AI 2.0 removed the automatic multi-turn tool-execution loop
  * that used to live inside every {@code ChatModel} — a model call now
@@ -82,6 +86,7 @@ public class AgentLoop {
     private final SystemPromptLoader systemPromptLoader;
     private final AgentProperties properties;
     private final ObjectMapper objectMapper;
+    private final BreakerRegistry breakerRegistry;
 
     public AgentLoop(
             ChatModel chatModel,
@@ -89,13 +94,15 @@ public class AgentLoop {
             ToolRegistry toolRegistry,
             SystemPromptLoader systemPromptLoader,
             AgentProperties properties,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            BreakerRegistry breakerRegistry) {
         this.chatModel = chatModel;
         this.toolCallingManager = toolCallingManager;
         this.toolRegistry = toolRegistry;
         this.systemPromptLoader = systemPromptLoader;
         this.properties = properties;
         this.objectMapper = objectMapper;
+        this.breakerRegistry = breakerRegistry;
     }
 
     /**
@@ -121,8 +128,14 @@ public class AgentLoop {
         // — see docs/concepts/04-schema-forced-output.md.
         AnthropicChatOptions defaultOptions = (AnthropicChatOptions) chatModel.getDefaultOptions();
         AnthropicChatOptions.Builder builder = (AnthropicChatOptions.Builder) defaultOptions.mutate();
-        ToolCallingChatOptions options = builder.toolCallbacks(toolRegistry.toolCallbacks())
+        ToolCallingChatOptions options = builder.toolCallbacks(toolRegistry.toolCallbacks(traceId))
                 .toolChoice(ToolChoice.ofAny(ToolChoiceAny.builder().build()))
+                // One tool call per turn keeps "the tool that just ran" (used
+                // by the breaker check below) unambiguous. A model deciding
+                // to look up an order and refund it in the same breath would
+                // otherwise make "which tool's breaker do we check" a real
+                // question with no good answer.
+                .disableParallelToolUse(true)
                 .build();
 
         Prompt prompt = new Prompt(
@@ -130,8 +143,21 @@ public class AgentLoop {
 
         int totalTokens = 0;
         String modelUsed = null;
+        String lastToolName = null;
 
         for (int iteration = 1; iteration <= properties.maxIterations(); iteration++) {
+            // Checked before asking the model again, not after: an open
+            // breaker costs zero tokens rather than one more round trip.
+            // See docs/concepts/03-circuit-breaker.md.
+            if (lastToolName != null) {
+                try {
+                    breakerRegistry.assertClosed(lastToolName);
+                } catch (BreakerOpenException e) {
+                    return AgentResponse.escalated(
+                            traceBuilder.build(), iteration - 1, totalTokens, TerminationReason.BREAKER_OPEN, modelUsed);
+                }
+            }
+
             ChatResponse response;
             try {
                 response = callModelWithTimeout(prompt);
@@ -172,6 +198,10 @@ public class AgentLoop {
             AssistantMessage assistantMessage = response.getResult().getOutput();
             for (AssistantMessage.ToolCall toolCall : assistantMessage.getToolCalls()) {
                 traceBuilder.recordToolCall(iteration, toolCall.name(), toolCall.arguments());
+                // disableParallelToolUse guarantees exactly one call per
+                // turn, so this is unambiguous: the one tool the next
+                // iteration's breaker check above cares about.
+                lastToolName = toolCall.name();
             }
 
             ToolExecutionResult toolExecutionResult = toolCallingManager.executeToolCalls(prompt, response);

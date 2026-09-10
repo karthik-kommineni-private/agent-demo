@@ -6,10 +6,12 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 import com.example.orderagent.config.AgentProperties;
+import com.example.orderagent.config.DemoProperties;
 import com.example.orderagent.dto.response.AgentResponse;
 import com.example.orderagent.enums.AgentStatus;
 import com.example.orderagent.enums.TerminationReason;
 import com.example.orderagent.service.OrderService;
+import com.example.orderagent.service.governance.BreakerRegistry;
 import com.example.orderagent.service.tool.IssueRefundTool;
 import com.example.orderagent.service.tool.LookupOrderTool;
 import com.example.orderagent.service.tool.OrderAgentTool;
@@ -56,18 +58,32 @@ class AgentLoopTest {
     private OrderService orderService;
 
     private AgentLoop newAgentLoop(AgentProperties properties) {
+        return newAgentLoop(properties, new BreakerRegistry(properties));
+    }
+
+    private AgentLoop newAgentLoop(AgentProperties properties, BreakerRegistry breakerRegistry) {
         // AgentLoop mutates the model's own default options (to preserve the
         // configured model name) rather than building fresh ones, so the
         // mock must return something real to mutate.
         when(chatModel.getDefaultOptions()).thenReturn(AnthropicChatOptions.builder().model("claude-sonnet-5").build());
 
-        List<OrderAgentTool<?, ?>> tools =
-                List.of(new LookupOrderTool(orderService), new IssueRefundTool(orderService), new SubmitAnswerTool());
-        ToolRegistry toolRegistry = new ToolRegistry(tools, JsonMapper.builder().build());
+        List<OrderAgentTool<?, ?>> tools = List.of(
+                new LookupOrderTool(orderService),
+                new IssueRefundTool(orderService, new DemoProperties(false, false)),
+                new SubmitAnswerTool());
+        // No governance interceptors: this test is about the loop's own
+        // control flow, not the guardrail chain (covered by Guardrail*Test).
+        ToolRegistry toolRegistry = new ToolRegistry(tools, List.of(), JsonMapper.builder().build());
         SystemPromptLoader promptLoader =
                 new SystemPromptLoader(new ClassPathResource("prompts/order-agent-system-prompt.md"));
         return new AgentLoop(
-                chatModel, toolCallingManager, toolRegistry, promptLoader, properties, JsonMapper.builder().build());
+                chatModel,
+                toolCallingManager,
+                toolRegistry,
+                promptLoader,
+                properties,
+                JsonMapper.builder().build(),
+                breakerRegistry);
     }
 
     private ChatResponse toolCallResponse(String toolCallId, String toolName, String argumentsJson) {
@@ -127,7 +143,7 @@ class AgentLoopTest {
         when(toolCallingManager.executeToolCalls(any(Prompt.class), eq(submitResponse)))
                 .thenReturn(toolExecutionResult(List.of(finalToolResponseMessage), true));
 
-        AgentResponse response = newAgentLoop(new AgentProperties(6, 20000, 30)).run("Where is order 1002?");
+        AgentResponse response = newAgentLoop(new AgentProperties(6, 20000, 30, 3)).run("Where is order 1002?");
 
         assertThat(response.status()).isEqualTo(AgentStatus.SUCCESS);
         assertThat(response.message()).isEqualTo("Order 1002 shipped on 2026-08-25.");
@@ -151,7 +167,7 @@ class AgentLoopTest {
         when(toolCallingManager.executeToolCalls(any(Prompt.class), any(ChatResponse.class)))
                 .thenReturn(toolExecutionResult(List.of(lookupToolResponseMessage), false));
 
-        AgentResponse response = newAgentLoop(new AgentProperties(3, 20000, 30)).run("Refund order 1002 please.");
+        AgentResponse response = newAgentLoop(new AgentProperties(3, 20000, 30, 3)).run("Refund order 1002 please.");
 
         assertThat(response.status()).isEqualTo(AgentStatus.ESCALATED);
         assertThat(response.terminationReason()).isEqualTo(TerminationReason.ITERATION_CAP);
@@ -163,7 +179,7 @@ class AgentLoopTest {
         ChatResponse lookupResponse = toolCallResponse("call-1", "lookupOrder", "{\"orderId\":1002}");
         when(chatModel.call(any(Prompt.class))).thenReturn(lookupResponse);
 
-        AgentResponse response = newAgentLoop(new AgentProperties(6, 100, 30)).run("Where is order 1002?");
+        AgentResponse response = newAgentLoop(new AgentProperties(6, 100, 30, 3)).run("Where is order 1002?");
 
         assertThat(response.status()).isEqualTo(AgentStatus.ESCALATED);
         assertThat(response.terminationReason()).isEqualTo(TerminationReason.BUDGET_CAP);
@@ -173,9 +189,46 @@ class AgentLoopTest {
     void errorsWhenTheModelStopsWithoutCallingSubmitAnswer() {
         when(chatModel.call(any(Prompt.class))).thenReturn(textOnlyResponse("I think it's fine."));
 
-        AgentResponse response = newAgentLoop(new AgentProperties(6, 20000, 30)).run("Where is order 1002?");
+        AgentResponse response = newAgentLoop(new AgentProperties(6, 20000, 30, 3)).run("Where is order 1002?");
 
         assertThat(response.status()).isEqualTo(AgentStatus.ERROR);
         assertThat(response.message()).contains("submit_answer");
+    }
+
+    @Test
+    void escalatesWhenTheLastToolsBreakerIsAlreadyOpen() {
+        // The breaker is checked at the top of each iteration, before
+        // calling the model again — see AgentLoop's class Javadoc. Here it's
+        // already open when the loop starts its second pass, from three
+        // prior failures recorded directly (standing in for what
+        // AuditInterceptor would have done after three real tool failures —
+        // see CircuitBreakerTest for that end-to-end path).
+        AgentProperties properties = new AgentProperties(6, 20000, 30, 3);
+        BreakerRegistry breakerRegistry = new BreakerRegistry(properties);
+        breakerRegistry.recordFailure("issueRefund");
+        breakerRegistry.recordFailure("issueRefund");
+        breakerRegistry.recordFailure("issueRefund");
+
+        ChatResponse refundCallResponse = toolCallResponse(
+                "call-1", "issueRefund", "{\"orderId\":1002,\"amount\":10,\"reason\":\"r\",\"idempotencyKey\":\"key-00000001\"}");
+        ToolResponseMessage.ToolResponse refundToolResponse = new ToolResponseMessage.ToolResponse(
+                "call-1", "issueRefund", "{\"failed\":true,\"reason\":\"Simulated failure\"}");
+        ToolResponseMessage refundToolResponseMessage =
+                ToolResponseMessage.builder().responses(List.of(refundToolResponse)).build();
+
+        when(chatModel.call(any(Prompt.class))).thenReturn(refundCallResponse);
+        when(toolCallingManager.executeToolCalls(any(Prompt.class), eq(refundCallResponse)))
+                .thenReturn(toolExecutionResult(List.of(refundToolResponseMessage), false));
+
+        AgentResponse response =
+                newAgentLoop(properties, breakerRegistry).run("Refund order 1002, retry until it works.");
+
+        assertThat(response.status()).isEqualTo(AgentStatus.ESCALATED);
+        assertThat(response.terminationReason()).isEqualTo(TerminationReason.BREAKER_OPEN);
+        // The first iteration still ran (the breaker check happens before
+        // asking the model, and there's no "last tool" yet on iteration 1)
+        // — it's the second iteration that gets stopped before spending a
+        // token on a dependency that's already known to be down.
+        assertThat(response.iterations()).isEqualTo(1);
     }
 }

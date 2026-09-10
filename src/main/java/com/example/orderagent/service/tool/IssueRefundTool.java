@@ -1,5 +1,6 @@
 package com.example.orderagent.service.tool;
 
+import com.example.orderagent.config.DemoProperties;
 import com.example.orderagent.dto.response.OrderDto;
 import com.example.orderagent.dto.tool.IssueRefundInput;
 import com.example.orderagent.dto.tool.IssueRefundOutput;
@@ -58,6 +59,7 @@ public class IssueRefundTool implements OrderAgentTool<IssueRefundInput, IssueRe
             """;
 
     private final OrderService orderService;
+    private final DemoProperties demoProperties;
 
     // In-memory only: one process, one lifetime. A restart forgets every
     // key, which is fine for this demo's single-instance H2 database but
@@ -65,8 +67,9 @@ public class IssueRefundTool implements OrderAgentTool<IssueRefundInput, IssueRe
     // docs/production-readiness.md.
     private final Map<String, IssueRefundOutput> seenIdempotencyKeys = new ConcurrentHashMap<>();
 
-    public IssueRefundTool(OrderService orderService) {
+    public IssueRefundTool(OrderService orderService, DemoProperties demoProperties) {
         this.orderService = orderService;
+        this.demoProperties = demoProperties;
     }
 
     @Override
@@ -90,7 +93,17 @@ public class IssueRefundTool implements OrderAgentTool<IssueRefundInput, IssueRe
     }
 
     @Override
+    public boolean isWriteOperation() {
+        return true;
+    }
+
+    @Override
     public IssueRefundOutput execute(IssueRefundInput input) {
+        if (demoProperties.failRefundTool()) {
+            // Fault injection for the circuit-breaker demo scenario only —
+            // orderagent.demo.fail-refund-tool is false in every real run.
+            throw new ToolExecutionException(name(), "Simulated failure (orderagent.demo.fail-refund-tool=true)");
+        }
         if (!IdempotencyKeys.isValid(input.idempotencyKey())) {
             throw new ToolExecutionException(name(), "Invalid idempotency key");
         }

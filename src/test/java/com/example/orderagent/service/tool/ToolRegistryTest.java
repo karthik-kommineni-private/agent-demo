@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.when;
 
+import com.example.orderagent.config.DemoProperties;
 import com.example.orderagent.dto.response.OrderDto;
 import com.example.orderagent.enums.OrderStatus;
 import com.example.orderagent.exception.ToolExecutionException;
@@ -33,8 +34,13 @@ class ToolRegistryTest {
     private ToolRegistry registry() {
         ObjectMapper objectMapper = JsonMapper.builder().build();
         List<OrderAgentTool<?, ?>> tools = List.of(
-                new LookupOrderTool(orderService), new IssueRefundTool(orderService), new SubmitAnswerTool());
-        return new ToolRegistry(tools, objectMapper);
+                new LookupOrderTool(orderService),
+                new IssueRefundTool(orderService, new DemoProperties(false, false)),
+                new SubmitAnswerTool());
+        // No governance interceptors here on purpose — this test is about
+        // ToolRegistry's own contract (schema validation, unknown tools),
+        // covered separately in service.governance's Guardrail*Test classes.
+        return new ToolRegistry(tools, List.of(), objectMapper);
     }
 
     @Test

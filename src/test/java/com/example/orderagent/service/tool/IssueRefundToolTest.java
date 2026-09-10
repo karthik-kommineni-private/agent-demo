@@ -6,6 +6,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+import com.example.orderagent.config.DemoProperties;
 import com.example.orderagent.dto.response.OrderDto;
 import com.example.orderagent.dto.tool.IssueRefundInput;
 import com.example.orderagent.dto.tool.IssueRefundOutput;
@@ -35,7 +36,7 @@ class IssueRefundToolTest {
                 OrderStatus.SHIPPED, LocalDate.of(2026, 8, 25), new BigDecimal("50.00"), "shipped late");
         when(orderService.applyRefund(1002L, new BigDecimal("50.00"))).thenReturn(Optional.of(updated));
 
-        IssueRefundTool tool = new IssueRefundTool(orderService);
+        IssueRefundTool tool = new IssueRefundTool(orderService, new DemoProperties(false, false));
         IssueRefundOutput output = tool.execute(new IssueRefundInput(1002L, new BigDecimal("50.00"), "shipped late", KEY));
 
         assertThat(output.orderId()).isEqualTo(1002L);
@@ -51,7 +52,7 @@ class IssueRefundToolTest {
                 OrderStatus.SHIPPED, LocalDate.of(2026, 8, 25), new BigDecimal("50.00"), "shipped late");
         when(orderService.applyRefund(1002L, new BigDecimal("50.00"))).thenReturn(Optional.of(updated));
 
-        IssueRefundTool tool = new IssueRefundTool(orderService);
+        IssueRefundTool tool = new IssueRefundTool(orderService, new DemoProperties(false, false));
         IssueRefundInput input = new IssueRefundInput(1002L, new BigDecimal("50.00"), "shipped late", KEY);
 
         IssueRefundOutput first = tool.execute(input);
@@ -68,7 +69,7 @@ class IssueRefundToolTest {
 
     @Test
     void rejectsAnInvalidIdempotencyKey() {
-        IssueRefundTool tool = new IssueRefundTool(orderService);
+        IssueRefundTool tool = new IssueRefundTool(orderService, new DemoProperties(false, false));
 
         assertThatThrownBy(() -> tool.execute(new IssueRefundInput(1002L, new BigDecimal("50.00"), "reason", "short")))
                 .isInstanceOf(ToolExecutionException.class)
@@ -77,7 +78,7 @@ class IssueRefundToolTest {
 
     @Test
     void rejectsANonPositiveAmount() {
-        IssueRefundTool tool = new IssueRefundTool(orderService);
+        IssueRefundTool tool = new IssueRefundTool(orderService, new DemoProperties(false, false));
 
         assertThatThrownBy(() -> tool.execute(new IssueRefundInput(1002L, BigDecimal.ZERO, "reason", KEY)))
                 .isInstanceOf(ToolExecutionException.class)
@@ -85,10 +86,19 @@ class IssueRefundToolTest {
     }
 
     @Test
+    void failsEveryCallWhenFaultInjectionIsEnabled() {
+        IssueRefundTool tool = new IssueRefundTool(orderService, new DemoProperties(true, false));
+
+        assertThatThrownBy(() -> tool.execute(new IssueRefundInput(1002L, new BigDecimal("10.00"), "reason", KEY)))
+                .isInstanceOf(ToolExecutionException.class)
+                .hasMessageContaining("Simulated failure");
+    }
+
+    @Test
     void throwsWhenNoSuchOrder() {
         when(orderService.applyRefund(9999L, new BigDecimal("10.00"))).thenReturn(Optional.empty());
 
-        IssueRefundTool tool = new IssueRefundTool(orderService);
+        IssueRefundTool tool = new IssueRefundTool(orderService, new DemoProperties(false, false));
 
         assertThatThrownBy(() -> tool.execute(new IssueRefundInput(9999L, new BigDecimal("10.00"), "reason", KEY)))
                 .isInstanceOf(ToolExecutionException.class)

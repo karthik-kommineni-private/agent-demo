@@ -17,10 +17,14 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param modelCallTimeoutSeconds how long a single model call may run before
  *                                the loop gives up on it and escalates with
  *                                {@code MODEL_UNAVAILABLE}
+ * @param breakerThreshold        consecutive failures on the same tool before
+ *                                {@code BreakerRegistry} opens it and the loop
+ *                                escalates with {@code BREAKER_OPEN}
  */
 @ConfigurationProperties(prefix = "orderagent")
 public record AgentProperties(
         @DefaultValue("6") int maxIterations,
         @DefaultValue("20000") int tokenBudget,
-        @DefaultValue("30") int modelCallTimeoutSeconds) {
+        @DefaultValue("30") int modelCallTimeoutSeconds,
+        @DefaultValue("3") int breakerThreshold) {
 }

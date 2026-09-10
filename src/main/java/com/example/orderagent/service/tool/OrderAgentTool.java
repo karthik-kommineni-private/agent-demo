@@ -53,6 +53,18 @@ public interface OrderAgentTool<I, O> {
     }
 
     /**
+     * Whether this tool changes state (versus a read-only lookup).
+     *
+     * <p>True only for {@code issueRefund}. Drives two governance
+     * decisions: {@code AllowlistInterceptor} blocks it outright in
+     * dry-run mode, and it's the class of tool non-negotiable rule 2
+     * requires a pre-hook and breaker registration for.
+     */
+    default boolean isWriteOperation() {
+        return false;
+    }
+
+    /**
      * Runs this tool's domain logic against already-validated input.
      *
      * @param input the deserialized, schema-checked arguments

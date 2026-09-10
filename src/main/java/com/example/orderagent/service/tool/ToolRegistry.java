@@ -1,6 +1,13 @@
 package com.example.orderagent.service.tool;
 
+import com.example.orderagent.dto.tool.ToolBlocked;
+import com.example.orderagent.dto.tool.ToolFailed;
+import com.example.orderagent.exception.BreakerOpenException;
+import com.example.orderagent.exception.PolicyViolationException;
 import com.example.orderagent.exception.ToolExecutionException;
+import com.example.orderagent.service.governance.ToolCallContext;
+import com.example.orderagent.service.governance.ToolInterceptor;
+import com.example.orderagent.service.governance.ToolOutcome;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -17,10 +24,10 @@ import tools.jackson.databind.exc.UnrecognizedPropertyException;
  * Maps a tool name to its schema and handler, and is the single point
  * through which every tool call actually runs.
  *
- * <p>"Single point" is deliberate: from Phase 4 on, the governance
- * interceptor chain wraps calls to {@link #invoke(String, String)}, not
- * calls to the individual tool classes. There is no path to a tool that
- * skips the guardrails, because there is no other way to reach one.
+ * <p>"Single point" is deliberate: the governance interceptor chain
+ * ({@code service.governance}) runs entirely inside {@link #invoke}, not
+ * around calls to the individual tool classes. There is no path to a tool
+ * that skips the guardrails, because there is no other way to reach one.
  *
  * <p><b>Why arguments are re-validated here instead of trusted from the
  * model:</b> a tool's JSON Schema — see {@link OrderAgentTool#inputSchema()}
@@ -29,19 +36,27 @@ import tools.jackson.databind.exc.UnrecognizedPropertyException;
  * arguments with a strict Jackson mapper that fails on an unrecognized
  * field, so "the model sent an extra field" is a real, testable rejection
  * rather than a suggestion the model is free to ignore.
+ *
+ * @see com.example.orderagent.service.governance.ToolInterceptor for the
+ *      guardrails run around every call
  */
 @Component
 public class ToolRegistry {
 
     private final Map<String, OrderAgentTool<Object, Object>> toolsByName;
+    private final List<ToolInterceptor> interceptors;
     private final ObjectMapper strictMapper;
     private final ObjectMapper outputMapper;
 
     @SuppressWarnings("unchecked")
-    public ToolRegistry(List<OrderAgentTool<?, ?>> tools, ObjectMapper objectMapper) {
+    public ToolRegistry(List<OrderAgentTool<?, ?>> tools, List<ToolInterceptor> interceptors, ObjectMapper objectMapper) {
         this.toolsByName = tools.stream()
                 .map(tool -> (OrderAgentTool<Object, Object>) tool)
                 .collect(Collectors.toMap(OrderAgentTool::name, Function.identity()));
+        // Spring injects List<ToolInterceptor> already ordered by @Order —
+        // Allowlist, then Policy, then Redaction, then Audit. That order is
+        // load-bearing: see each interceptor's class Javadoc for why.
+        this.interceptors = interceptors;
         // A dedicated copy of the app's ObjectMapper so tool-argument parsing
         // stays strict (rejects unknown fields) without changing how JSON is
         // handled anywhere else in the app.
@@ -70,53 +85,100 @@ public class ToolRegistry {
     }
 
     /**
-     * Parses {@code argumentsJson} against the named tool's input type,
-     * runs the tool, and returns its output serialized back to JSON.
-     *
-     * @param toolName      the tool to run, as named in {@link OrderAgentTool#name()}
-     * @param argumentsJson the model-supplied arguments, as a raw JSON object string
-     * @return the tool's output, serialized to JSON
-     * @throws ToolExecutionException if the tool is unknown, the arguments
-     *         don't match its schema (an unrecognized field included), or
-     *         the tool's own execution fails
+     * {@link #invoke(String, String, String)} with no trace id, for tests
+     * and other callers that don't need the call correlated to a request.
      */
     public String invoke(String toolName, String argumentsJson) {
-        OrderAgentTool<Object, Object> tool = get(toolName);
+        return invoke("untraced", toolName, argumentsJson);
+    }
 
-        Object input;
+    /**
+     * Parses {@code argumentsJson}, runs the governance interceptor chain,
+     * executes the tool if nothing blocked it, and returns a JSON result —
+     * the tool's real output, or a structured block/failure the model can
+     * read and explain.
+     *
+     * @param traceId       the id correlating this call to one agent request
+     * @param toolName      the tool to run, as named in {@link OrderAgentTool#name()}
+     * @param argumentsJson the model-supplied arguments, as a raw JSON object string
+     * @return the tool's output, or a {@code ToolBlocked}/{@code ToolFailed}
+     *         payload, serialized to JSON
+     * @throws ToolExecutionException if the tool is unknown or the arguments
+     *         don't match its schema — a contract violation, not a runtime
+     *         outcome, so it isn't shaped into JSON for the model
+     */
+    public String invoke(String traceId, String toolName, String argumentsJson) {
+        OrderAgentTool<Object, Object> tool = get(toolName);
+        Object input = parseArguments(tool, argumentsJson);
+        ToolCallContext ctx = new ToolCallContext(traceId, toolName, input);
+
         try {
-            input = strictMapper.readValue(argumentsJson, tool.inputType());
-        } catch (UnrecognizedPropertyException e) {
-            throw new ToolExecutionException(
-                    toolName, "Unrecognized argument \"" + e.getPropertyName() + "\" for tool " + toolName, e);
-        } catch (Exception e) {
-            throw new ToolExecutionException(
-                    toolName, "Invalid arguments for tool " + toolName + ": " + e.getMessage(), e);
+            for (ToolInterceptor interceptor : interceptors) {
+                interceptor.preInvoke(ctx);
+            }
+        } catch (PolicyViolationException | BreakerOpenException e) {
+            runPostHooks(ctx, new ToolOutcome.Blocked(e.getMessage()));
+            return serialize(new ToolBlocked(e.getMessage()));
         }
 
-        Object output = tool.execute(input);
-
+        ToolOutcome outcome;
+        Object output = null;
         try {
-            return outputMapper.writeValueAsString(output);
+            output = tool.execute(input);
+            outcome = new ToolOutcome.Success(output);
+        } catch (RuntimeException e) {
+            outcome = new ToolOutcome.Failure(e);
+        }
+
+        runPostHooks(ctx, outcome);
+
+        if (outcome instanceof ToolOutcome.Failure failure) {
+            return serialize(new ToolFailed(failure.exception().getMessage()));
+        }
+        return serialize(output);
+    }
+
+    private void runPostHooks(ToolCallContext ctx, ToolOutcome outcome) {
+        for (ToolInterceptor interceptor : interceptors) {
+            interceptor.postInvoke(ctx, outcome);
+        }
+    }
+
+    private Object parseArguments(OrderAgentTool<Object, Object> tool, String argumentsJson) {
+        try {
+            return strictMapper.readValue(argumentsJson, tool.inputType());
+        } catch (UnrecognizedPropertyException e) {
+            throw new ToolExecutionException(
+                    tool.name(), "Unrecognized argument \"" + e.getPropertyName() + "\" for tool " + tool.name(), e);
         } catch (Exception e) {
-            throw new ToolExecutionException(toolName, "Failed to serialize output of tool " + toolName, e);
+            throw new ToolExecutionException(
+                    tool.name(), "Invalid arguments for tool " + tool.name() + ": " + e.getMessage(), e);
+        }
+    }
+
+    private String serialize(Object value) {
+        try {
+            return outputMapper.writeValueAsString(value);
+        } catch (Exception e) {
+            throw new ToolExecutionException("unknown", "Failed to serialize tool result", e);
         }
     }
 
     /**
      * Adapts every registered tool into a Spring AI {@link ToolCallback},
-     * for attaching to a {@code Prompt}'s chat options.
+     * bound to one request's trace id, for attaching to a {@code Prompt}'s
+     * chat options.
      *
-     * <p>Every callback routes through {@link #invoke(String, String)} —
-     * there is deliberately no other implementation of the actual call
+     * <p>Every callback routes through {@link #invoke(String, String, String)}
+     * — there is deliberately no other implementation of the actual call
      * logic, so {@code ToolCallingManager} executing a tool and a test
      * calling {@link #invoke} directly exercise the exact same code path.
      */
-    public List<ToolCallback> toolCallbacks() {
-        return tools().stream().map(this::asToolCallback).toList();
+    public List<ToolCallback> toolCallbacks(String traceId) {
+        return tools().stream().map(tool -> asToolCallback(tool, traceId)).toList();
     }
 
-    private ToolCallback asToolCallback(OrderAgentTool<Object, Object> tool) {
+    private ToolCallback asToolCallback(OrderAgentTool<Object, Object> tool, String traceId) {
         ToolDefinition definition = ToolDefinition.builder()
                 .name(tool.name())
                 .description(tool.description())
@@ -136,7 +198,7 @@ public class ToolRegistry {
 
             @Override
             public String call(String toolInput) {
-                return invoke(tool.name(), toolInput);
+                return invoke(traceId, tool.name(), toolInput);
             }
         };
     }
