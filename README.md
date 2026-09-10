@@ -101,10 +101,12 @@ These are the demo scenarios. Each is a test, so each is verifiable.
 
 **1. It's actually an agent**
 "Refund order 1002 if it shipped late" requires the model to look up the
-order, read the ship date, decide, then refund. Two tool calls, and the
-second is only reachable because of what the first returned. Nobody wrote
-that sequence.
-→ `mvn test -Dtest=AgentLoopTest#resolvesMultiStepRequest`
+order, read the ship date, decide, then refund. Three tool calls
+(`lookupOrder`, `issueRefund`, `submit_answer`), and the second is only
+reachable because of what the first returned. Nobody wrote that sequence.
+→ `curl -X POST localhost:8080/orders/agent -d '{"request": "Refund order 1002 if it shipped late."}'`
+— or `mvn test -Dtest=AgentLoopGoldenTest` for the same shape (a
+different, recorded scenario) with zero API calls.
 
 **2. Policy holds when the model is wrong**
 "Refund order 1002 for $5000" on a $120 order. The model may decide to
