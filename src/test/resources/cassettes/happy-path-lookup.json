@@ -1,0 +1,21 @@
+[ {
+  "content" : "",
+  "toolCalls" : [ {
+    "id" : "toolu_01QNqnZeAg3bhMX8RBVV1Tzz",
+    "name" : "lookupOrder",
+    "argumentsJson" : "{\"orderId\":1001}"
+  } ],
+  "promptTokens" : 1352,
+  "completionTokens" : 31,
+  "model" : "claude-haiku-4-5-20251001"
+}, {
+  "content" : "",
+  "toolCalls" : [ {
+    "id" : "toolu_01T8tBcg61HtWs7oKBiSUSEV",
+    "name" : "submit_answer",
+    "argumentsJson" : "{\"message\":\"Order 1001 has been delivered! It was shipped on August 14, 2026 and has arrived at its destination. The order total was $89.99. If you have any questions about the contents or need further assistance, please let me know.\"}"
+  } ],
+  "promptTokens" : 1512,
+  "completionTokens" : 82,
+  "model" : "claude-haiku-4-5-20251001"
+} ]
