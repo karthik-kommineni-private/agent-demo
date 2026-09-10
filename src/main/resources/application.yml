@@ -1,0 +1,35 @@
+spring:
+  application:
+    name: order-agent
+  datasource:
+    url: jdbc:h2:mem:orderagent;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    open-in-view: false
+    hibernate:
+      # create-drop is fine for an in-memory H2 demo DB seeded fresh from
+      # data.sql on every start — there is no schema to migrate.
+      ddl-auto: create-drop
+    defer-datasource-initialization: true
+  sql:
+    init:
+      mode: always
+  ai:
+    anthropic:
+      api-key: ${ANTHROPIC_API_KEY:}
+      chat:
+        options:
+          model: claude-sonnet-5
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics
+
+orderagent:
+  max-iterations: 6
+  token-budget: 20000
+  model-call-timeout-seconds: 30
