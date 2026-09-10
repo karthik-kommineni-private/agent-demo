@@ -1,6 +1,7 @@
 package com.example.orderagent.controller.advice;
 
 import com.example.orderagent.dto.response.AgentResponse;
+import java.math.BigDecimal;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -25,11 +26,11 @@ class GlobalExceptionHandler {
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
     AgentResponse handleValidationFailure(MethodArgumentNotValidException e) {
-        return AgentResponse.error(null, 0, 0, "The request was malformed: " + e.getMessage(), null);
+        return AgentResponse.error(null, 0, 0, BigDecimal.ZERO, "The request was malformed: " + e.getMessage(), null);
     }
 
     @ExceptionHandler(Exception.class)
     AgentResponse handleUnexpectedFailure(Exception e) {
-        return AgentResponse.error(null, 0, 0, "The request could not be processed.", null);
+        return AgentResponse.error(null, 0, 0, BigDecimal.ZERO, "The request could not be processed.", null);
     }
 }

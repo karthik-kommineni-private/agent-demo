@@ -37,3 +37,13 @@ orderagent:
   demo:
     fail-refund-tool: false
     dry-run-mode: false
+  # Illustrative list prices, dollars per 1,000,000 tokens. Check the
+  # provider's current pricing page before treating these as real bills.
+  pricing:
+    models:
+      claude-haiku-4-5-20251001:
+        input-per-million-tokens: 1.00
+        output-per-million-tokens: 5.00
+      claude-sonnet-5:
+        input-per-million-tokens: 3.00
+        output-per-million-tokens: 15.00

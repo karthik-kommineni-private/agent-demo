@@ -9,6 +9,7 @@ import com.example.orderagent.enums.TerminationReason;
 import com.example.orderagent.exception.BreakerOpenException;
 import com.example.orderagent.service.governance.BreakerRegistry;
 import com.example.orderagent.service.tool.ToolRegistry;
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -87,6 +88,7 @@ public class AgentLoop {
     private final AgentProperties properties;
     private final ObjectMapper objectMapper;
     private final BreakerRegistry breakerRegistry;
+    private final TokenMeter tokenMeter;
 
     public AgentLoop(
             ChatModel chatModel,
@@ -95,7 +97,8 @@ public class AgentLoop {
             SystemPromptLoader systemPromptLoader,
             AgentProperties properties,
             ObjectMapper objectMapper,
-            BreakerRegistry breakerRegistry) {
+            BreakerRegistry breakerRegistry,
+            TokenMeter tokenMeter) {
         this.chatModel = chatModel;
         this.toolCallingManager = toolCallingManager;
         this.toolRegistry = toolRegistry;
@@ -103,6 +106,7 @@ public class AgentLoop {
         this.properties = properties;
         this.objectMapper = objectMapper;
         this.breakerRegistry = breakerRegistry;
+        this.tokenMeter = tokenMeter;
     }
 
     /**
@@ -142,6 +146,7 @@ public class AgentLoop {
                 List.of(new SystemMessage(systemPromptLoader.content()), new UserMessage(userRequest)), options);
 
         int totalTokens = 0;
+        BigDecimal totalCost = BigDecimal.ZERO;
         String modelUsed = null;
         String lastToolName = null;
 
@@ -154,7 +159,7 @@ public class AgentLoop {
                     breakerRegistry.assertClosed(lastToolName);
                 } catch (BreakerOpenException e) {
                     return AgentResponse.escalated(
-                            traceBuilder.build(), iteration - 1, totalTokens, TerminationReason.BREAKER_OPEN, modelUsed);
+                            traceBuilder.build(), iteration - 1, totalTokens, totalCost, TerminationReason.BREAKER_OPEN, modelUsed);
                 }
             }
 
@@ -166,21 +171,25 @@ public class AgentLoop {
                     Thread.currentThread().interrupt();
                 }
                 return AgentResponse.escalated(
-                        traceBuilder.build(), iteration - 1, totalTokens, TerminationReason.MODEL_UNAVAILABLE, modelUsed);
+                        traceBuilder.build(), iteration - 1, totalTokens, totalCost, TerminationReason.MODEL_UNAVAILABLE, modelUsed);
             }
 
             ChatResponseMetadata metadata = response.getMetadata();
             if (metadata != null) {
                 modelUsed = metadata.getModel();
                 Usage usage = metadata.getUsage();
-                if (usage != null && usage.getTotalTokens() != null) {
-                    totalTokens += usage.getTotalTokens();
+                if (usage != null) {
+                    int promptTokens = usage.getPromptTokens() != null ? usage.getPromptTokens() : 0;
+                    int completionTokens = usage.getCompletionTokens() != null ? usage.getCompletionTokens() : 0;
+                    totalTokens += promptTokens + completionTokens;
+                    totalCost = totalCost.add(tokenMeter.cost(modelUsed, promptTokens, completionTokens));
+                    tokenMeter.recordUsage(modelUsed, promptTokens, completionTokens);
                 }
             }
 
             if (totalTokens > properties.tokenBudget()) {
                 return AgentResponse.escalated(
-                        traceBuilder.build(), iteration, totalTokens, TerminationReason.BUDGET_CAP, modelUsed);
+                        traceBuilder.build(), iteration, totalTokens, totalCost, TerminationReason.BUDGET_CAP, modelUsed);
             }
 
             if (!response.hasToolCalls()) {
@@ -191,6 +200,7 @@ public class AgentLoop {
                         traceBuilder.build(),
                         iteration,
                         totalTokens,
+                        totalCost,
                         "The model stopped without calling submit_answer.",
                         modelUsed);
             }
@@ -208,14 +218,14 @@ public class AgentLoop {
 
             if (toolExecutionResult.returnDirect()) {
                 String finalAnswer = extractSubmitAnswerMessage(toolExecutionResult.conversationHistory());
-                return AgentResponse.success(finalAnswer, traceBuilder.build(), iteration, totalTokens, modelUsed);
+                return AgentResponse.success(finalAnswer, traceBuilder.build(), iteration, totalTokens, totalCost, modelUsed);
             }
 
             prompt = new Prompt(toolExecutionResult.conversationHistory(), options);
         }
 
         return AgentResponse.escalated(
-                traceBuilder.build(), properties.maxIterations(), totalTokens, TerminationReason.ITERATION_CAP, modelUsed);
+                traceBuilder.build(), properties.maxIterations(), totalTokens, totalCost, TerminationReason.ITERATION_CAP, modelUsed);
     }
 
     /**

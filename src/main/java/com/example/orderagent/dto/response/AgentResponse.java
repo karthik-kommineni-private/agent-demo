@@ -14,8 +14,8 @@ import java.math.BigDecimal;
  * @param trace            every tool call made while resolving this request
  * @param iterations       how many passes through the loop this request took
  * @param totalTokens      prompt + completion tokens across every model call this request made
- * @param cost             the dollar cost of those tokens; {@code null} until Phase 5 wires up
- *                         {@code TokenMeter} and {@code PriceTable}
+ * @param cost             the dollar cost of those tokens, from {@code TokenMeter}; zero if the
+ *                         model used has no price configured, never null
  * @param terminationReason why the loop stopped
  * @param modelUsed        the model name reported by the last model response
  */
@@ -30,17 +30,18 @@ public record AgentResponse(
         String modelUsed) {
 
     public static AgentResponse success(
-            String message, AgentTrace trace, int iterations, int totalTokens, String modelUsed) {
+            String message, AgentTrace trace, int iterations, int totalTokens, BigDecimal cost, String modelUsed) {
         return new AgentResponse(
-                AgentStatus.SUCCESS, message, trace, iterations, totalTokens, null, TerminationReason.COMPLETED, modelUsed);
+                AgentStatus.SUCCESS, message, trace, iterations, totalTokens, cost, TerminationReason.COMPLETED, modelUsed);
     }
 
     public static AgentResponse escalated(
-            AgentTrace trace, int iterations, int totalTokens, TerminationReason reason, String modelUsed) {
-        return new AgentResponse(AgentStatus.ESCALATED, null, trace, iterations, totalTokens, null, reason, modelUsed);
+            AgentTrace trace, int iterations, int totalTokens, BigDecimal cost, TerminationReason reason, String modelUsed) {
+        return new AgentResponse(AgentStatus.ESCALATED, null, trace, iterations, totalTokens, cost, reason, modelUsed);
     }
 
-    public static AgentResponse error(AgentTrace trace, int iterations, int totalTokens, String message, String modelUsed) {
-        return new AgentResponse(AgentStatus.ERROR, message, trace, iterations, totalTokens, null, null, modelUsed);
+    public static AgentResponse error(
+            AgentTrace trace, int iterations, int totalTokens, BigDecimal cost, String message, String modelUsed) {
+        return new AgentResponse(AgentStatus.ERROR, message, trace, iterations, totalTokens, cost, null, modelUsed);
     }
 }

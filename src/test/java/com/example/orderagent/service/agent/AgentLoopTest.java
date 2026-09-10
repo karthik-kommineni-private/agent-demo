@@ -7,6 +7,7 @@ import static org.mockito.Mockito.when;
 
 import com.example.orderagent.config.AgentProperties;
 import com.example.orderagent.config.DemoProperties;
+import com.example.orderagent.config.PriceTableProperties;
 import com.example.orderagent.dto.response.AgentResponse;
 import com.example.orderagent.enums.AgentStatus;
 import com.example.orderagent.enums.TerminationReason;
@@ -17,7 +18,9 @@ import com.example.orderagent.service.tool.LookupOrderTool;
 import com.example.orderagent.service.tool.OrderAgentTool;
 import com.example.orderagent.service.tool.SubmitAnswerTool;
 import com.example.orderagent.service.tool.ToolRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -76,6 +79,7 @@ class AgentLoopTest {
         ToolRegistry toolRegistry = new ToolRegistry(tools, List.of(), JsonMapper.builder().build());
         SystemPromptLoader promptLoader =
                 new SystemPromptLoader(new ClassPathResource("prompts/order-agent-system-prompt.md"));
+        TokenMeter tokenMeter = new TokenMeter(new PriceTableProperties(Map.of()), new SimpleMeterRegistry());
         return new AgentLoop(
                 chatModel,
                 toolCallingManager,
@@ -83,7 +87,8 @@ class AgentLoopTest {
                 promptLoader,
                 properties,
                 JsonMapper.builder().build(),
-                breakerRegistry);
+                breakerRegistry,
+                tokenMeter);
     }
 
     private ChatResponse toolCallResponse(String toolCallId, String toolName, String argumentsJson) {
