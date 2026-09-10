@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.ai.anthropic.AnthropicChatOptions;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
@@ -55,6 +56,11 @@ class AgentLoopTest {
     private OrderService orderService;
 
     private AgentLoop newAgentLoop(AgentProperties properties) {
+        // AgentLoop mutates the model's own default options (to preserve the
+        // configured model name) rather than building fresh ones, so the
+        // mock must return something real to mutate.
+        when(chatModel.getDefaultOptions()).thenReturn(AnthropicChatOptions.builder().model("claude-sonnet-5").build());
+
         List<OrderAgentTool<?, ?>> tools =
                 List.of(new LookupOrderTool(orderService), new IssueRefundTool(orderService), new SubmitAnswerTool());
         ToolRegistry toolRegistry = new ToolRegistry(tools, JsonMapper.builder().build());

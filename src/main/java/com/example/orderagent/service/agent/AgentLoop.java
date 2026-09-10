@@ -1,5 +1,7 @@
 package com.example.orderagent.service.agent;
 
+import com.anthropic.models.messages.ToolChoice;
+import com.anthropic.models.messages.ToolChoiceAny;
 import com.example.orderagent.config.AgentProperties;
 import com.example.orderagent.dto.response.AgentResponse;
 import com.example.orderagent.dto.tool.SubmitAnswerInput;
@@ -20,6 +22,7 @@ import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.anthropic.AnthropicChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.model.tool.ToolCallingManager;
@@ -105,8 +108,22 @@ public class AgentLoop {
         String traceId = UUID.randomUUID().toString();
         AgentTraceBuilder traceBuilder = new AgentTraceBuilder(traceId, systemPromptLoader.version());
 
-        ToolCallingChatOptions options =
-                ToolCallingChatOptions.builder().toolCallbacks(toolRegistry.toolCallbacks()).build();
+        // Mutating the model's own default options (rather than building a
+        // fresh ToolCallingChatOptions from scratch) is what keeps the model
+        // name, temperature, etc. configured under spring.ai.anthropic.* —
+        // a bare builder() here would silently fall back to the provider's
+        // hardcoded default model instead of the one set in application.yml.
+        //
+        // toolChoice(any) forces every turn to call some tool rather than
+        // reply in plain text. Without it, a model can (and in testing,
+        // did) just answer in prose instead of calling submit_answer, which
+        // would leave AgentLoop with no forced-shape final answer to return
+        // — see docs/concepts/04-schema-forced-output.md.
+        AnthropicChatOptions defaultOptions = (AnthropicChatOptions) chatModel.getDefaultOptions();
+        AnthropicChatOptions.Builder builder = (AnthropicChatOptions.Builder) defaultOptions.mutate();
+        ToolCallingChatOptions options = builder.toolCallbacks(toolRegistry.toolCallbacks())
+                .toolChoice(ToolChoice.ofAny(ToolChoiceAny.builder().build()))
+                .build();
 
         Prompt prompt = new Prompt(
                 List.of(new SystemMessage(systemPromptLoader.content()), new UserMessage(userRequest)), options);
