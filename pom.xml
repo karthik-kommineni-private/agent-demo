@@ -81,6 +81,33 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
+            <plugin>
+                <groupId>com.diffplug.spotless</groupId>
+                <artifactId>spotless-maven-plugin</artifactId>
+                <version>3.10.2</version>
+                <configuration>
+                    <!-- Deliberately light-touch: no full reformatter (e.g.
+                         googleJavaFormat) here. This codebase's formatting
+                         is hand-authored to match CLAUDE.md's conventions;
+                         a full reformatter would rewrite every file's
+                         indentation and wrapping in one pass the first time
+                         it ran, which is a much bigger change than "fix the
+                         file I just edited." -->
+                    <java>
+                        <includes>
+                            <include>src/main/java/**/*.java</include>
+                            <include>src/test/java/**/*.java</include>
+                        </includes>
+                        <removeUnusedImports/>
+                        <trimTrailingWhitespace/>
+                        <endWithNewline/>
+                        <indent>
+                            <spaces>true</spaces>
+                            <spacesPerTab>4</spacesPerTab>
+                        </indent>
+                    </java>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
 

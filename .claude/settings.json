@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "file=$(jq -r '.tool_input.file_path // empty'); case \"$file\" in *.java) ./mvnw -q spotless:apply -DspotlessFiles=\"$file\" ;; esac"
+          },
+          {
+            "type": "command",
+            "command": "file=$(jq -r '.tool_input.file_path // empty'); case \"$file\" in */service/governance/*.java) ./mvnw -q test -Dtest='Guardrail*Test' ;; esac"
+          }
+        ]
+      }
+    ]
+  }
+}
